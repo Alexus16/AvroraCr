@@ -8,7 +8,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Net.Security;
-using System.Security.Cryptography;
 using WebSocket4Net;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Authentication;
@@ -56,139 +55,8 @@ Thread thread = new Thread(() =>
 });
 thread.Start();
 
-Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
-Socket clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
-Socket acceptedClientSocket;
-SslStream serverSslStream = null;
-
-clientSocket.Bind(new IPEndPoint(IPAddress.Loopback, 500));
-clientSocket.Listen(128);
-clientSocket.BeginAccept(OnClientAccepted, null);
-
-
-void OnClientAccepted(IAsyncResult result)
-{
-    Console.WriteLine("Try to connect socket");
-    try
-    {
-        acceptedClientSocket = clientSocket.EndAccept(result);
-        Console.WriteLine("Socket client<->proxy connected");
-        if (!serverSocket.Connected)
-        {
-            Console.WriteLine("Socket server<->proxy connecting...");
-            serverSocket.BeginConnect(originalUrlWS, 443, OnServerConnected, null);
-            //ClientWebSocket socket = new ClientWebSocket();
-            //CancellationTokenSource source = new CancellationTokenSource();
-            //socket.ConnectAsync(new Uri("wss://mirea.aco-avrora.ru/student/arm/"), source.Token).Wait();
-        }
-        var networkStream = new NetworkStream(acceptedClientSocket);
-        while (acceptedClientSocket.Connected)
-        {
-            if (networkStream.DataAvailable)
-            {
-                List<byte> fullmessageBuffer = new List<byte>();
-                StringBuilder builder = new StringBuilder();
-                while(networkStream.DataAvailable)
-                {
-                    byte[] buffer = new byte[1024 * 30];
-                    int len = networkStream.Read(buffer, 0, buffer.Length);
-                    builder.Append(Encoding.UTF8.GetString(buffer, 0, len));
-                    fullmessageBuffer.AddRange(buffer.Take(len));
-                    Thread.Sleep(1);
-                }
-                string request = builder.ToString();
-                //Console.WriteLine($"Client -> Proxy:\n{request}\n=-=End message=-=");
-                if (checkHandshakeHTTPRequest(request))
-                {
-                    string handshakeAnswer = createAnswerWebSocketHandshake(request);
-                    Console.WriteLine($"Handshake request detected, answer:\n{handshakeAnswer}\n=-=End answer=-=");
-                    acceptedClientSocket.Send(Encoding.UTF8.GetBytes(handshakeAnswer));
-                }
-                else
-                {
-                    string[] requests = WebSocketFrameDecoder.Decode(fullmessageBuffer.ToArray());
-                    foreach(var req in requests)
-                    {
-                        Console.WriteLine($"Client -> Proxy(exp):\n{req}\n=-=End Message=-=");
-                        while ((!serverSocket?.Connected ?? true) || !isAuth) { }
-                        byte[] buffer = WebSocketFrameDecoder.Encode(req, true);
-                        Console.WriteLine($"Proxy -> Server:\n{WebSocketFrameDecoder.Decode(buffer)[0]}\n=-=End Message=-=");
-                        serverSslStream.Write(buffer);
-                    }
-                    //Console.WriteLine(WebSocketFrameDecoder.Decode(buffer));
-                    //serverSocket.Send(fullmessageBuffer.ToArray());
-                }
-            }
-        }
-        serverSocket?.Disconnect(false);
-    }
-    catch
-    {
-        throw;
-    }
-    finally
-    {
-        clientSocket.BeginAccept(OnClientAccepted, null);
-    }
-}
-
-void OnServerConnected(IAsyncResult result)
-{
-    var networkStream = new NetworkStream(serverSocket);
-    serverSslStream = new SslStream(networkStream, false, new RemoteCertificateValidationCallback(checkServerCert), null);
-    serverSslStream.AuthenticateAsClient("mirea.aco-avrora.ru");
-    //serverSocket.EndConnect(result);
-    while (!serverSocket.Connected) { }
-    Console.WriteLine("Socket server<->proxy connected");
-    if(serverSocket.Connected)
-    {
-        string handshakeRequest = createRequestWebSocketHandshake("mirea.aco-avrora.ru");
-        Console.WriteLine($"Handshaking server:\n{handshakeRequest}\n=-=End request=-=");
-        serverSslStream.Write(Encoding.UTF8.GetBytes(handshakeRequest));
-    }
-    isAuth = true;
-    while(serverSocket.Connected)
-    {
-        if(networkStream.DataAvailable)
-        {
-            StringBuilder builder = new StringBuilder();
-            List<byte> fullmessageBuffer = new List<byte>();
-            while(networkStream.DataAvailable)
-            {
-                byte[] buffer = new byte[1024 * 30];
-                int len = serverSslStream.Read(buffer, 0, buffer.Length);
-                builder.Append(Encoding.UTF8.GetString(buffer, 0, len));
-                fullmessageBuffer.AddRange(buffer.Take(len));
-            }
-            string rawRequest = builder.ToString();
-            if(!rawRequest.StartsWith("HTTP"))
-            {
-                //Console.WriteLine("Received something");
-                byte[] pongAnswer = WebSocketFrameDecoder.CreatePong(fullmessageBuffer.ToArray());
-                if (pongAnswer is not null)
-                {
-                    Console.WriteLine("Ping received, pong sending...");
-                    serverSslStream.Write(pongAnswer);
-                }
-                string[] requests = WebSocketFrameDecoder.Decode(fullmessageBuffer.ToArray());
-                foreach(var req in requests)
-                {
-                    Console.WriteLine($"Server -> Proxy:\n{req}\n=-=End Message=-=");
-                    byte[] buffer = WebSocketFrameDecoder.Encode(req, false);
-                    Console.WriteLine($"Proxy -> Client:\n{WebSocketFrameDecoder.Decode(buffer)[0]}\n=-=End Message=-=");
-                    acceptedClientSocket.Send(buffer);
-                }
-        }
-        }
-    }
-    Console.WriteLine("Socket server<->proxy disconnected");
-}
-
-bool checkServerCert(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors)
-{
-    return true;
-}
-
+WebSocketProxy proxy = new WebSocketProxy("mirea.aco-avrora.ru", 443, 500);
+proxy.Init();
 
 string getOriginalPageText(string localPath)
 {

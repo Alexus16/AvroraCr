@@ -1,294 +1,375 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Net.Http.Headers;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace AuroraProxy
 {
-    public static class WebSocketFrameDecoder
+    public static class WebSocketLimits
     {
-        private static readonly Random __random__ = new Random();
-        private static readonly int __maxLen126__ = (int)Math.Pow(2, 16);
-        private static readonly int __maxLen127__ = (int)Math.Pow(2, 30);
-        public static string[] Decode(byte[] message)
+        public static readonly int MAX_LEN_125 = 125;
+        public static readonly int MAX_LEN_126 = 65536;
+        public static readonly int MAX_LEN_127 = 1073741824;
+    }
+
+    public class WebSocketFrameCoder
+    {
+        private readonly Random _random_ = new Random();
+        private byte[] _endOfPreviousBuffer = new byte[0];
+
+        public WebSocketFrame CreatePingFrame()
         {
-            List<string> decodedFrames = new List<string>();
+            WebSocketFrame frame = new WebSocketFrame();
+            frame.IsFinal = true;
+            frame.Length = 0;
+            frame.Mask = null;
+            frame.OpCode = WebSocketFrameOpCode.PING;
+            return frame;
+        }
+
+        public WebSocketFrame CreatePongFrame(WebSocketFrame pingFrame)
+        {
+            WebSocketFrame frame = new WebSocketFrame();
+            frame.IsFinal = true;
+            frame.Length = pingFrame.Length;
+            frame.Mask = createMask();
+            frame.OpCode = WebSocketFrameOpCode.PONG;
+            frame.OriginalBytes = pingFrame.OriginalBytes;
+            return frame;
+        }
+
+        public WebSocketFrame CreateCloseFrame(bool isMasked)
+        {
+            WebSocketFrame frame = new WebSocketFrame();
+            frame.IsFinal = true;
+            frame.Length = 0;
+            frame.Mask = isMasked ? createMask() : null;
+            frame.OpCode = WebSocketFrameOpCode.CLOSE;
+            return frame;
+        }
+
+        public WebSocketFrame[] FromBytes(byte[] bytes)
+        {
+            List<WebSocketFrame> restoredFromBytes = new();
             int offset = 0;
             while(offset != -1)
             {
-                string decodedMessage = decodeSingleFrame(message, ref offset);
-                if(decodedMessage is not null)
-                    decodedFrames.Add(decodedMessage);
+                WebSocketFrame singleFrame = singleFromBytes(_endOfPreviousBuffer.Concat(bytes).ToArray(), ref offset);
+                if (singleFrame is not null) restoredFromBytes.Add(singleFrame);
             }
-            return decodedFrames.ToArray();
+            return restoredFromBytes.ToArray();
         }
 
-        private static string decodeSingleFrame(byte[] fullMessage, ref int offset)
+        private WebSocketFrame singleFromBytes(byte[] bytes, ref int offset)
         {
-            byte[] message = fullMessage.Skip(offset).ToArray();
-            if (message.Length < 2) return null;
-            bool FIN = (message[0] & 0B10000000) != 0;
-            bool RSV1 = (message[0] & 0B01000000) != 0;
-            bool RSV2 = (message[0] & 0B00100000) != 0;
-            bool RSV3 = (message[0] & 0B00010000) != 0;
-            byte opCode = (byte)(message[0] & 0B00001111);
-            bool isMask = (message[1] & 0B10000000) != 0;
-            int readIndex = 2;
-            long length = (message[1] & 0B01111111);
-            if (length == 126) //2 bytes for payload length
+            byte[] offsettedBytes = bytes.Skip(offset).ToArray();
+            int readIndex = 0;
+            if (offsettedBytes.Length < 2) return null;
+            try
             {
-                readIndex += 2;
-                length = (message[2] * (1 << 8)) + message[3];
-            }
-            else if (length == 127) //8 bytes for payload length
-            {
-                readIndex += 8;
-                length = 0;
-                for (int i = 2; i < 10; i++)
+                WebSocketFrame frame = new WebSocketFrame();
+                frame.IsFinal = (offsettedBytes[readIndex] & 0x80) != 0;
+                frame.ReservedBit1 = (offsettedBytes[readIndex] & 0x40) != 0;
+                frame.ReservedBit2 = (offsettedBytes[readIndex] & 0x20) != 0;
+                frame.ReservedBit3 = (offsettedBytes[readIndex] & 0x10) != 0;
+                frame.OpCode = (WebSocketFrameOpCode)(offsettedBytes[readIndex++] & 0x0F);
+                bool isMasked = (offsettedBytes[readIndex] & 0x80) != 0;
+                int length = (offsettedBytes[readIndex++] & 0x7F);
+                if (length == 126)
                 {
-                    length *= (1 << 8);
-                    length += message[i];
+                    length = 0;
+                    for (int i = 0; i < 2; i++)
+                    {
+                        length *= (1 << 8);
+                        length += offsettedBytes[readIndex++];
+                    }
                 }
-            }
-            int Mask = 0;
-            if (isMask)
-            {
-                for (int i = readIndex; i < readIndex + 4; i++)
+                else if (length == 127)
                 {
-                    Mask *= (1 << 8);
-                    Mask += message[i];
+                    length = 0;
+                    for (int i = 0; i < 8; i++)
+                    {
+                        length *= (1 << 8);
+                        length += offsettedBytes[readIndex++];
+                    }
                 }
-                readIndex += 4;
-            }
-            byte[] maskedBytes = message.Skip(readIndex).Take((int)length).ToArray();
-            offset += readIndex + (int)length;
-            if (offset >= fullMessage.Length) offset = -1;
-            byte[] originalBytes;
-            if (isMask)
-            {
-                originalBytes = new byte[maskedBytes.Length];
-                for (int i = 0; i < maskedBytes.Length; i++)
+                frame.Length = length;
+                if (isMasked)
                 {
-                    byte maskedByte = (byte)((Mask & (0B11111111 << 8 * (3 - (i % 4)))) >> (8 * (3 - (i % 4))));
-                    originalBytes[i] = (byte)(maskedBytes[i] ^ maskedByte);
+                    int mask = 0;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        mask <<= 8;
+                        mask |= offsettedBytes[readIndex++];
+                    }
+                    frame.Mask = mask;
                 }
+                frame.MaskedBytes = offsettedBytes.Skip(readIndex).Take(length).ToArray();
+                offset += readIndex + length;
+                if (offset >= bytes.Length) offset = -1;
+                return frame;
             }
-            else
+            catch(InvalidOperationException ex)
             {
-                originalBytes = maskedBytes;
-            }
-#if DEBUG
-            //Console.WriteLine("FIN: " + (FIN ? "Yes" : "No"));
-            //Console.WriteLine("RSV1: " + (RSV1 ? "Yes" : "No"));
-            //Console.WriteLine("RSV2: " + (RSV2 ? "Yes" : "No"));
-            //Console.WriteLine("RSV3: " + (RSV3 ? "Yes" : "No"));
-            //Console.WriteLine("OpCode: " + opCode);
-            //Console.WriteLine("IsMask: " + (isMask ? "Yes" : "No"));
-            Console.WriteLine("Length: " + length);
-            //Console.WriteLine("Mask: " + Mask);
-            //Console.WriteLine("Masked bytes:");
-            //foreach (var b in maskedBytes)
-            //{
-            //    Console.Write(b + " ");
-            //}
-            //Console.WriteLine();
-            //Console.WriteLine("Original bytes:");
-            //foreach (var b in originalBytes)
-            //{
-            //    Console.Write(b + " ");
-            //}
-            //Console.WriteLine();
-#endif
-            if (opCode != 1) return null;
-            return Encoding.UTF8.GetString(originalBytes);
-        }
-
-        public static byte[] Encode(string message, bool isMaskRequired)
-        {
-            List<byte> messageBytes = new List<byte>();
-            int offset = 0;
-            while(offset != -1)
-            {
-                messageBytes.AddRange(createSingleFrame(message, ref offset, isMaskRequired));
-            }
-            return messageBytes.ToArray();
-        }
-
-        private static int createMask()
-        {
-            int mask = __random__.Next();
-            return mask;
-        }
-
-        private static byte createFirstByte(FrameInfo info)
-        {
-            byte fByte = 0;
-            fByte = (byte)(fByte | (info.IsFinal ? 0B10000000 : 0));
-            fByte = (byte)(fByte | 0B00000001);
-            return fByte;
-        }
-
-        private static byte createSecondByte(FrameInfo info)
-        {
-            byte sByte = (byte)(info.Mask != -1 ? 0B10000000 : 0B00000000);
-            if (info.Length < 126)
-            {
-                sByte = (byte)(sByte | info.Length);
-            }
-            else if (info.Length <= __maxLen126__)
-            {
-                sByte = (byte)(sByte | 126);
-            }
-            else
-            {
-                sByte = (byte)(sByte | 127);
-            }
-            return sByte;
-        }
-
-        private static byte[] createLengthByte(FrameInfo info)
-        {
-            byte[] lengthBytes;
-            if(info.Length < 126)
-            {
+                offset = -1;
+                _endOfPreviousBuffer = offsettedBytes;
                 return null;
             }
-            else if(info.Length < __maxLen126__)
+            catch
             {
-                lengthBytes = new byte[2];
-                for(int i = 0; i < 2; i++)
-                {
-                    lengthBytes[i] = (byte)((info.Length & (0B11111111 << (8 * (1 - (i % 4))))) >> (8 * (1 - (i % 4))));
-                }
-                return lengthBytes;
-            }
-            else
-            {
-                lengthBytes = new byte[8];
-                for (int i = 0; i < 2; i++)
-                {
-                    lengthBytes[i] = (byte)((info.Length & (0B11111111 << (8 * (3 - (i % 4))))) >> (8 * (3 - (i % 4))));
-                }
-                return lengthBytes;
+                throw;
             }
         }
 
-        private static byte[] createMaskBytes(FrameInfo info)
+        public byte[] ToBytes(WebSocketFrame[] frames)
         {
-            if (info.Mask == -1) return null;
-            byte[] maskBytes = new byte[4];
-            for(int i = 0; i < 4; i++)
+            List<byte> bytes = new();
+            foreach(var frame in frames)
             {
-                maskBytes[i] = (byte)((info.Mask & (0B11111111 << (8 * (3 - (i % 4))))) >> (8 * (3 - (i % 4))));
+                bytes.AddRange(frame.FrameBytes);
             }
-            return maskBytes;
+            return bytes.ToArray();
         }
 
-        public static byte[] CreatePong(byte[] request)
+        public WebSocketFrame[] EncodeTextData(string text, bool isMasked)
         {
-            if ((request[0] & 0B1111) == 0x9)
-            {
-                FrameInfo info = new FrameInfo();
-                info.Mask = createMask();
-                byte[] answerBytes = new byte[request.Length + 4];
-                answerBytes[0] = (byte)(request[0] & 0xF0 | 0x0A);
-                answerBytes[1] = (byte)(request[1] | 0x80);
-                byte[] maskBytes = createMaskBytes(info);
-                maskBytes.CopyTo(answerBytes, 2);
-                for(int i = 0; i < request.Length - 2; i++)
-                {
-                    answerBytes[i + 6] = (byte)(request[i + 2] ^ maskBytes[i % 4]);
-                }
-                return answerBytes;
-            }
-            return null;
+            byte[] originalDataBytes = Encoding.UTF8.GetBytes(text);
+            return encodeData(originalDataBytes, isMasked, WebSocketFrameOpCode.TEXT);
         }
 
-        private static byte[] createSingleFrame(string message, ref int offset, bool isMask)
+        public WebSocketFrame[] EncodeBinData(byte[] data, bool isMasked)
         {
-            string offsetMessage = message.Substring(offset);
-            FrameInfo info = new FrameInfo();
-            info.Mask = isMask ? createMask() : -1;
-            info.IsFinal = offsetMessage.Length <= __maxLen127__;
-            byte[] originalBytes = Encoding.UTF8.GetBytes(info.IsFinal ? offsetMessage : offsetMessage.Substring(__maxLen127__));
-            info.Length = Math.Min(originalBytes.Length, __maxLen127__);
-            byte[] headerFrameBytes;
-            if(offsetMessage.Length < 126)
+            return encodeData(data, isMasked, WebSocketFrameOpCode.BIN);
+        }
+
+        private WebSocketFrame[] encodeData(byte[] data, bool isMasked, WebSocketFrameOpCode opCode)
+        {
+            List<WebSocketFrame> encodedFrames = new();
+            int offset = 0;
+            while(offset != -1)
             {
-                headerFrameBytes = new byte[2];
+                encodedFrames.Add(encodeFrame(data, isMasked, opCode, ref offset));
             }
-            else if(offsetMessage.Length <= __maxLen126__)
+            return encodedFrames.ToArray();
+        }
+
+        private WebSocketFrame encodeFrame(byte[] data, bool isMasked, WebSocketFrameOpCode opCode, ref int offset)
+        {
+            byte[] dataToEncode = data.Skip(offset).ToArray();
+            WebSocketFrame frame = new WebSocketFrame();
+            frame.IsFinal = true;
+            if (dataToEncode.Length > WebSocketLimits.MAX_LEN_127)
             {
-                headerFrameBytes = new byte[4];
-            }
-            else
-            {
-                headerFrameBytes = new byte[10];
-            }
-            headerFrameBytes[0] = createFirstByte(info);
-            headerFrameBytes[1] = createSecondByte(info);
-            byte[] lenBytes = createLengthByte(info);
-            byte[] maskBytes = createMaskBytes(info);
-            int writeIndex = 2;
-            if(lenBytes is not null)
-            {
-                for (int i = 0; i < lenBytes.Length; i++)
-                {
-                    headerFrameBytes[writeIndex++] = lenBytes[i];
-                }
-            }
-            byte[] maskedBytes = new byte[originalBytes.Length];
-            if(info.Mask != -1)
-            {
-                for (int i = 0; i < originalBytes.Length; i++)
-                {
-                    byte maskByte = maskBytes[i % 4];
-                    maskedBytes[i] = (byte)(originalBytes[i] ^ maskByte);
-                }
+                offset += WebSocketLimits.MAX_LEN_127;
+                dataToEncode = dataToEncode.Take(WebSocketLimits.MAX_LEN_127).ToArray();
+                frame.IsFinal = false;
             }
             else
-            {
-                maskedBytes = originalBytes;
-            }
-            
-            List<byte> frameBytes = new List<byte>();
-            frameBytes.AddRange(headerFrameBytes);
-            if(info.Mask != -1)
-            {
-                frameBytes.AddRange(maskBytes);
-            }
-            frameBytes.AddRange(maskedBytes);
-            if(info.IsFinal)
             {
                 offset = -1;
             }
-            else
-            {
-                offset += __maxLen127__ + 1;
-            }
-            return frameBytes.ToArray();
+            frame.OpCode = opCode;
+            if (isMasked) frame.Mask = createMask();
+            frame.Length = dataToEncode.Length;
+            frame.OriginalBytes = dataToEncode;
+            return frame;
         }
 
-        public static byte[] CreatePing()
+        public string[] DecodeTextData(WebSocketFrame[] textFrames)
         {
-            FrameInfo info = new FrameInfo();
-            byte[] pingBytes = new byte[6];
-            pingBytes[0] = 0B10001001;
-            pingBytes[1] = 0B10000000;
-            info.Mask = createMask();
-            byte[] maskBytes = createMaskBytes(info);
-            maskBytes.CopyTo(pingBytes, 2);
-            return pingBytes;
+            List<string> texts = new List<string>();
+            StringBuilder stringBuilder = new StringBuilder();
+            for(int i = 0; i < textFrames.Length; i++)
+            {
+                stringBuilder.Append(Encoding.UTF8.GetString(textFrames[i].OriginalBytes));
+                if (textFrames[i].IsFinal)
+                {
+                    texts.Add(stringBuilder.ToString());
+                    stringBuilder = new();
+                }
+            }
+            return texts.ToArray();
+        }
+
+        private int createMask()
+        {
+            return _random_.Next();
         }
     }
 
-    class FrameInfo
+    public enum WebSocketFrameType
     {
-        public bool IsFinal;
-        public int Mask;
-        public int Length;
+        TEXT_DATA   = 0,
+        BIN_DATA    = 1,
+        CONTROL     = 2,
+    }
+
+    public enum WebSocketFrameOpCode
+    {
+        CONTINIOUS  = 0x00,
+        TEXT        = 0x01,
+        BIN         = 0x02,
+        CLOSE       = 0x08,
+        PING        = 0x09,
+        PONG        = 0x0A,
+    }
+
+    public class WebSocketFrame
+    {
+        private byte[] originalBytes = null;
+        private byte[] maskedBytes = null;
+        private WebSocketFrameOpCode opCode;
+        private int length;
+        public bool IsFinal { get; set; }
+        public bool ReservedBit1 { get; set; } = false;
+        public bool ReservedBit2 { get; set; } = false;
+        public bool ReservedBit3 { get; set; } = false;
+        public WebSocketFrameOpCode OpCode
+        {
+            get => opCode;
+            set
+            {
+                if (value < (byte)0x00 || (byte)value > 0x0F) throw new InvalidOperationException();
+                opCode = value;
+            }
+        }
+        public bool IsMasked => Mask is not null;
+        public int Length
+        {
+            get => length;
+            set
+            {
+                if (value < 0 || value > WebSocketLimits.MAX_LEN_127) throw new InvalidOperationException();
+                length = value;
+            }
+        }
+        public int? Mask { get; set; }
+
+        public byte LengthByte => getLengthByte();
+        public bool IsLengthExtended => Length > WebSocketLimits.MAX_LEN_125;
+        public byte[] ExtendedLengthBytes => getExtendedLengthBytes();
+        public byte[] MaskBytes => getMaskBytes();
+
+        private byte getLengthByte()
+        {
+            if(Length <= WebSocketLimits.MAX_LEN_125)
+            {
+                return (byte)Length;
+            }
+            else if(Length <= WebSocketLimits.MAX_LEN_126)
+            {
+                return 126;
+            }
+            else
+            {
+                return 127;
+            }
+        }
+
+        private byte[] getExtendedLengthBytes()
+        {
+            if (Length < WebSocketLimits.MAX_LEN_125) return null;
+            if (Length < WebSocketLimits.MAX_LEN_126)
+            {
+                byte[] buffer126 = new byte[2];
+                for(int i = 0; i < buffer126.Length; i++)
+                {
+                    buffer126[i] += (byte)((Length & (0xFF << (8 * (1 - (i % 2))))) >> (8 * (1 - (i % 2))));
+                }
+                return buffer126;
+            }
+            byte[] buffer127 = new byte[8];
+            for(int i = 0; i < buffer127.Length; i++)
+            {
+                buffer127[i] += (byte)((Length & (0xFF << (8 * (7 - (i % 8))))) >> (8 * (7 - (i % 8))));
+            }
+            return buffer127;
+        }
+
+        private byte[] getMaskBytes()
+        {
+            if (!IsMasked) return null;
+            byte[] buffer = new byte[4];
+            for(int i = 0; i < buffer.Length; i++)
+            {
+                buffer[i] = (byte)((Mask & (0xFF << (8 * (3 - (i % 4))))) >> (8 * (3 - (i % 4))));
+            }
+            return buffer;
+        }
+
+        public byte[] MaskedBytes
+        {
+            get => maskedBytes;
+            set => setMaskedBytes(value);
+        }
+
+        public byte[] OriginalBytes
+        {
+            get => originalBytes;
+            set => setOriginalBytes(value);
+        }
+
+        public byte[] FrameBytes => getFrameBytes();
+
+        private void setMaskedBytes(byte[] newBytes)
+        {
+            if (newBytes.Length != Length) throw new InvalidOperationException($"Uncompatible lengths: {newBytes.Length} != {Length}");
+            maskedBytes = new byte[Length];
+            newBytes.CopyTo(maskedBytes, 0);
+            if(IsMasked)
+            {
+                originalBytes = applyMask(maskedBytes, MaskBytes);
+            }
+            else
+            {
+                originalBytes = new byte[maskedBytes.Length];
+                maskedBytes.CopyTo(originalBytes, 0);
+            }
+        }
+
+        private void setOriginalBytes(byte[] newBytes)
+        {
+            if (newBytes.Length != Length) throw new InvalidOperationException("Uncompatible lengths");
+            originalBytes = new byte[newBytes.Length];
+            newBytes.CopyTo(originalBytes, 0);
+            if(IsMasked)
+            {
+                maskedBytes = applyMask(originalBytes, MaskBytes);
+            }
+            else
+            {
+                maskedBytes = new byte[originalBytes.Length];
+                originalBytes.CopyTo(maskedBytes, 0);
+            }
+        }
+
+        private byte[] applyMask(byte[] data, byte[] maskBytes)
+        {
+            if (maskBytes.Length != 4) throw new InvalidOperationException();
+            byte[] maskedData = new byte[data.Length];
+            for(int i = 0; i < data.Length; i++)
+            {
+                maskedData[i] = (byte)(data[i] ^ maskBytes[i % 4]);
+            }
+            return maskedData;
+        }
+
+        private byte[] getFrameBytes()
+        {
+            byte fByte = (byte)((IsFinal ? 0x80 : 0) | (ReservedBit1 ? 0x40 : 0) | (ReservedBit2 ? 0x20 : 0) | (ReservedBit1 ? 0x10 : 0) | (byte)OpCode);
+            byte sByte = (byte)((IsMasked ? 0x80 : 0) | LengthByte);
+            List<byte> frameBytesList = new List<byte>();
+            frameBytesList.Add(fByte);
+            frameBytesList.Add(sByte);
+            if(IsLengthExtended) frameBytesList.AddRange(ExtendedLengthBytes);
+            if(IsMasked) frameBytesList.AddRange(MaskBytes);
+            frameBytesList.AddRange(MaskedBytes ?? new byte[0]);
+            return frameBytesList.ToArray();
+        }
     }
 }
 
