@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.3.32825.248
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AuroraProxy", "AuroraProxy\AuroraProxy.csproj", "{15DB2FB0-BFE6-49DA-886A-2E94231771EF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{15DB2FB0-BFE6-49DA-886A-2E94231771EF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{15DB2FB0-BFE6-49DA-886A-2E94231771EF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{15DB2FB0-BFE6-49DA-886A-2E94231771EF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{15DB2FB0-BFE6-49DA-886A-2E94231771EF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {3A23AFC8-4146-405A-ABCA-4C0F7C78B846}
+	EndGlobalSection
+EndGlobal
