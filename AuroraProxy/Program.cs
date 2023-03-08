@@ -47,6 +47,10 @@ Thread thread = new Thread(() =>
             originalPage = originalPage.Replace("+location.host+'/student/arm/'", "+\"127.0.0.1:500\"");
             originalPage = originalPage.Replace("wss:", "ws:");
         }
+        if(request.Url.LocalPath.Contains("app"))
+        {
+            originalPage = originalPage.Replace("canPaste:", "canPaste: function(txt, isHTML) {return(true);}, fuckPuturidze:");
+        }
         context.Response.OutputStream.Write(Encoding.UTF8.GetBytes(originalPage));
         response.OutputStream.Close();
         response.Close();

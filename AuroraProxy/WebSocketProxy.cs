@@ -26,6 +26,7 @@ namespace AuroraProxy
         private int _serverPort;
         private int _proxyPort;
 
+
         public bool IsServerConnectionInitialized { get; private set; } = false;
         public bool IsClientConnectionInitialized { get; private set; } = false;
         public string CustomUserAgent { get; set; }
@@ -74,17 +75,15 @@ namespace AuroraProxy
                 if (_clientStream.DataAvailable)
                 {
                     List<byte> fullReadBuffer = new List<byte>();
-                    while (_clientStream.DataAvailable)
-                    {
-                        byte[] readBuffer = new byte[1024*1024];
-                        int len = _clientStream.Read(readBuffer, 0, readBuffer.Length);
-                        fullReadBuffer.AddRange(readBuffer.Take(len));
-                    }
+                    byte[] readBuffer = new byte[1024];
+                    int len = _clientStream.Read(readBuffer, 0, readBuffer.Length);
+                    
+                    fullReadBuffer.AddRange(readBuffer.Take(len));
                     WebSocketFrame[] readFrames = clientCoder.FromBytes(fullReadBuffer.ToArray());
                     string[] texts = clientCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
                     foreach (string text in texts)
                     {
-                        Console.WriteLine($"CLIENT -> SERVER: {text}");
+                        //Console.WriteLine($"CLIENT -> SERVER: {text}");
                         byte[] retranslateBuffer = clientCoder.ToBytes(clientCoder.EncodeTextData(text, true));
                         _securedServerStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
                     }
@@ -115,14 +114,15 @@ namespace AuroraProxy
                 if(_serverStream.DataAvailable)
                 {
                     List<byte> fullReadBuffer = new List<byte>();
+                    byte[] readBuffer = new byte[1024];
                     while (_serverStream.DataAvailable)
                     {
-                        byte[] readBuffer = new byte[1024*1024];
                         int len = _securedServerStream.Read(readBuffer, 0, readBuffer.Length);
+                        Console.WriteLine($"LENGTH OF READ DATA: {len}");
                         fullReadBuffer.AddRange(readBuffer.Take(len));
                     }
                     WebSocketFrame[] readFrames = serverCoder.FromBytes(fullReadBuffer.ToArray());
-                    if(readFrames.Length == 0) continue;
+                    if (readFrames.Length == 0) continue;
                     WebSocketFrame pingFrame = readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.PING).LastOrDefault();
                     if(pingFrame is not null)
                     {
@@ -134,7 +134,7 @@ namespace AuroraProxy
                     string[] texts = serverCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
                     foreach (string text in texts)
                     {
-                        Console.WriteLine($"SERVER -> CLIENT: {text}");
+                        //Console.WriteLine($"SERVER -> CLIENT: {text}");
                         var frames = serverCoder.EncodeTextData(text, false);
                         byte[] retranslateBuffer = serverCoder.ToBytes(frames);
                         _clientStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
@@ -161,7 +161,7 @@ namespace AuroraProxy
             StringBuilder sb = new StringBuilder();
             while (stream.DataAvailable)
             {
-                byte[] readBuffer = new byte[10240];
+                byte[] readBuffer = new byte[1024];
                 int len = securedStream.Read(readBuffer, 0, readBuffer.Length);
                 sb.Append(Encoding.UTF8.GetString(readBuffer, 0, len));
             }
@@ -217,7 +217,7 @@ namespace AuroraProxy
             requestSB.AppendLine("Sec-WebSocket-Version: 13");
             requestSB.AppendLine("Accept-Encoding: gzip, deflate, br");
             requestSB.AppendLine("Sec-WebSocket-Key: " + Convert.ToBase64String(buffer));
-            requestSB.AppendLine("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits");
+            //requestSB.AppendLine("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits");
             requestSB.AppendLine();
             return requestSB.ToString();
         }

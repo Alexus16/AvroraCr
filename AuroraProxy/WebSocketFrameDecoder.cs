@@ -55,10 +55,13 @@ namespace AuroraProxy
         public WebSocketFrame[] FromBytes(byte[] bytes)
         {
             List<WebSocketFrame> restoredFromBytes = new();
+            byte[] fullBytes = new byte[bytes.Length + _endOfPreviousBuffer.Length];
+            _endOfPreviousBuffer.CopyTo(fullBytes, 0);
+            bytes.CopyTo(fullBytes, _endOfPreviousBuffer.Length);
             int offset = 0;
             while(offset != -1)
             {
-                WebSocketFrame singleFrame = singleFromBytes(_endOfPreviousBuffer.Concat(bytes).ToArray(), ref offset);
+                WebSocketFrame singleFrame = singleFromBytes(fullBytes, ref offset);
                 if (singleFrame is not null) restoredFromBytes.Add(singleFrame);
             }
             return restoredFromBytes.ToArray();
@@ -66,63 +69,95 @@ namespace AuroraProxy
 
         private WebSocketFrame singleFromBytes(byte[] bytes, ref int offset)
         {
+            _endOfPreviousBuffer = new byte[0];
             byte[] offsettedBytes = bytes.Skip(offset).ToArray();
             int readIndex = 0;
-            if (offsettedBytes.Length < 2) return null;
-            try
+            if (offsettedBytes.Length < 2)
             {
-                WebSocketFrame frame = new WebSocketFrame();
-                frame.IsFinal = (offsettedBytes[readIndex] & 0x80) != 0;
-                frame.ReservedBit1 = (offsettedBytes[readIndex] & 0x40) != 0;
-                frame.ReservedBit2 = (offsettedBytes[readIndex] & 0x20) != 0;
-                frame.ReservedBit3 = (offsettedBytes[readIndex] & 0x10) != 0;
-                frame.OpCode = (WebSocketFrameOpCode)(offsettedBytes[readIndex++] & 0x0F);
-                bool isMasked = (offsettedBytes[readIndex] & 0x80) != 0;
-                int length = (offsettedBytes[readIndex++] & 0x7F);
-                if (length == 126)
-                {
-                    length = 0;
-                    for (int i = 0; i < 2; i++)
-                    {
-                        length *= (1 << 8);
-                        length += offsettedBytes[readIndex++];
-                    }
-                }
-                else if (length == 127)
-                {
-                    length = 0;
-                    for (int i = 0; i < 8; i++)
-                    {
-                        length *= (1 << 8);
-                        length += offsettedBytes[readIndex++];
-                    }
-                }
-                frame.Length = length;
-                if (isMasked)
-                {
-                    int mask = 0;
-                    for (int i = 0; i < 4; i++)
-                    {
-                        mask <<= 8;
-                        mask |= offsettedBytes[readIndex++];
-                    }
-                    frame.Mask = mask;
-                }
-                frame.MaskedBytes = offsettedBytes.Skip(readIndex).Take(length).ToArray();
-                offset += readIndex + length;
-                if (offset >= bytes.Length) offset = -1;
-                return frame;
-            }
-            catch(InvalidOperationException ex)
-            {
-                offset = -1;
                 _endOfPreviousBuffer = offsettedBytes;
+                offset = -1;
                 return null;
             }
-            catch
+            WebSocketFrame frame = new WebSocketFrame();
+            frame.IsFinal = (offsettedBytes[readIndex] & 0x80) != 0;
+            frame.ReservedBit1 = (offsettedBytes[readIndex] & 0x40) != 0;
+            frame.ReservedBit2 = (offsettedBytes[readIndex] & 0x20) != 0;
+            frame.ReservedBit3 = (offsettedBytes[readIndex] & 0x10) != 0;
+            frame.OpCode = (WebSocketFrameOpCode)(offsettedBytes[readIndex++] & 0x0F);
+            bool isMasked = (offsettedBytes[readIndex] & 0x80) != 0;
+            int length = (offsettedBytes[readIndex++] & 0x7F);
+            if (length == 126)
             {
-                throw;
+                length = 0;
+                for (int i = 0; i < 2; i++)
+                {
+                    length <<= 8;
+                    length |= offsettedBytes[readIndex++];
+                }
             }
+            else if (length == 127)
+            {
+                length = 0;
+                for (int i = 0; i < 8; i++)
+                {
+                    length <<= 8;
+                    length |= offsettedBytes[readIndex++];
+                }
+            }
+            if (length > offsettedBytes.Length - readIndex)
+            {
+                Console.WriteLine($"BUFFER NOT COMPLETE. DIFFERENCE: {length - offsettedBytes.Length + readIndex}");
+                _endOfPreviousBuffer = offsettedBytes.ToArray();
+                offset = -1;
+                return null;
+            }
+            frame.Length = length;
+            if (isMasked)
+            {
+                int mask = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    mask <<= 8;
+                    mask |= offsettedBytes[readIndex++];
+                }
+                frame.Mask = mask;
+            }
+            frame.MaskedBytes = offsettedBytes.Skip(readIndex).Take(length).ToArray();
+            offset += readIndex + length;
+            if (offset >= bytes.Length) offset = -1;
+#if DEBUG
+            Console.WriteLine("===============");
+            Console.WriteLine($"Original  1st byte: ");
+            for(int i = 7; i >= 0; i--)
+            {
+                Console.Write(((offsettedBytes[0] & (1 << i)) != 0) ? 1 : 0);
+            }
+            Console.WriteLine($"\nConverted 1st byte: ");
+            for(int i = 7; i >= 0; i--)
+            {
+                Console.Write(((frame.FrameBytes[0] & (1 << i)) != 0) ? 1 : 0);
+            }
+            Console.WriteLine($"\nOriginal  2nd byte: ");
+            for (int i = 7; i >= 0; i--)
+            {
+                Console.Write(((offsettedBytes[1] & (1 << i)) != 0) ? 1 : 0);
+            }
+            Console.WriteLine($"\nConverted 2nd byte: ");
+            for(int i = 7; i >= 0; i--)
+            {
+                Console.Write(((frame.FrameBytes[1] & (1 << i)) != 0) ? 1 : 0);
+            }
+            Console.WriteLine();
+            Console.WriteLine($"FIN: {(frame.IsFinal ? "1" : "0")} RSV1: {(frame.ReservedBit1 ? "1" : "0")} RSV2: {(frame.ReservedBit2 ? "1" : "0")} RSV3: {(frame.ReservedBit3 ? "1" : "0")}");
+            Console.WriteLine($"Opcode: {frame.OpCode.ToString()}");
+            Console.WriteLine($"Mask: {(frame.IsMasked ? "1" : 0)} Length: {frame.Length}");
+            Console.Write("Orig Bytes: ");
+            //foreach (var b in frame.OriginalBytes)
+            //    Console.Write($"{b} ");
+            Console.WriteLine($"Text: {(frame.OpCode == WebSocketFrameOpCode.TEXT ? Encoding.UTF8.GetString(frame.OriginalBytes) : "")}");
+            Console.WriteLine("===============");
+#endif
+            return frame;
         }
 
         public byte[] ToBytes(WebSocketFrame[] frames)
