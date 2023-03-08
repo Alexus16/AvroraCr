@@ -19,7 +19,7 @@ namespace AuroraProxy
     public class WebSocketFrameCoder
     {
         private readonly Random _random_ = new Random();
-        private byte[] _endOfPreviousBuffer = new byte[0];
+        private List<byte> _endOfPreviousBuffer = new();
 
         public WebSocketFrame CreatePingFrame()
         {
@@ -52,12 +52,12 @@ namespace AuroraProxy
             return frame;
         }
 
-        public WebSocketFrame[] FromBytes(byte[] bytes)
+        public IEnumerable<WebSocketFrame> FromBytes(IEnumerable<byte> bytes)
         {
             List<WebSocketFrame> restoredFromBytes = new();
-            byte[] fullBytes = new byte[bytes.Length + _endOfPreviousBuffer.Length];
-            _endOfPreviousBuffer.CopyTo(fullBytes, 0);
-            bytes.CopyTo(fullBytes, _endOfPreviousBuffer.Length);
+            List<byte> fullBytes = new();
+            fullBytes.AddRange(_endOfPreviousBuffer);
+            fullBytes.AddRange(bytes);
             int offset = 0;
             while(offset != -1)
             {
@@ -67,12 +67,12 @@ namespace AuroraProxy
             return restoredFromBytes.ToArray();
         }
 
-        private WebSocketFrame singleFromBytes(byte[] bytes, ref int offset)
+        private WebSocketFrame singleFromBytes(IEnumerable<byte> bytes, ref int offset)
         {
-            _endOfPreviousBuffer = new byte[0];
-            byte[] offsettedBytes = bytes.Skip(offset).ToArray();
+            _endOfPreviousBuffer = new();
+            List<byte> offsettedBytes = bytes.Skip(offset).ToList();
             int readIndex = 0;
-            if (offsettedBytes.Length < 2)
+            if (offsettedBytes.Count < 2)
             {
                 _endOfPreviousBuffer = offsettedBytes;
                 offset = -1;
@@ -104,10 +104,10 @@ namespace AuroraProxy
                     length |= offsettedBytes[readIndex++];
                 }
             }
-            if (length > offsettedBytes.Length - readIndex)
+            if (length > offsettedBytes.Count - readIndex)
             {
-                Console.WriteLine($"BUFFER NOT COMPLETE. DIFFERENCE: {length - offsettedBytes.Length + readIndex}");
-                _endOfPreviousBuffer = offsettedBytes.ToArray();
+                Console.WriteLine($"BUFFER NOT COMPLETE. DIFFERENCE: {length - offsettedBytes.Count + readIndex}");
+                _endOfPreviousBuffer = offsettedBytes;
                 offset = -1;
                 return null;
             }
@@ -124,34 +124,13 @@ namespace AuroraProxy
             }
             frame.MaskedBytes = offsettedBytes.Skip(readIndex).Take(length).ToArray();
             offset += readIndex + length;
-            if (offset >= bytes.Length) offset = -1;
+            if (offset >= bytes.Count()) offset = -1;
 #if DEBUG
             Console.WriteLine("===============");
-            Console.WriteLine($"Original  1st byte: ");
-            for(int i = 7; i >= 0; i--)
-            {
-                Console.Write(((offsettedBytes[0] & (1 << i)) != 0) ? 1 : 0);
-            }
-            Console.WriteLine($"\nConverted 1st byte: ");
-            for(int i = 7; i >= 0; i--)
-            {
-                Console.Write(((frame.FrameBytes[0] & (1 << i)) != 0) ? 1 : 0);
-            }
-            Console.WriteLine($"\nOriginal  2nd byte: ");
-            for (int i = 7; i >= 0; i--)
-            {
-                Console.Write(((offsettedBytes[1] & (1 << i)) != 0) ? 1 : 0);
-            }
-            Console.WriteLine($"\nConverted 2nd byte: ");
-            for(int i = 7; i >= 0; i--)
-            {
-                Console.Write(((frame.FrameBytes[1] & (1 << i)) != 0) ? 1 : 0);
-            }
-            Console.WriteLine();
             Console.WriteLine($"FIN: {(frame.IsFinal ? "1" : "0")} RSV1: {(frame.ReservedBit1 ? "1" : "0")} RSV2: {(frame.ReservedBit2 ? "1" : "0")} RSV3: {(frame.ReservedBit3 ? "1" : "0")}");
             Console.WriteLine($"Opcode: {frame.OpCode.ToString()}");
             Console.WriteLine($"Mask: {(frame.IsMasked ? "1" : 0)} Length: {frame.Length}");
-            Console.Write("Orig Bytes: ");
+            //Console.Write("Orig Bytes: ");
             //foreach (var b in frame.OriginalBytes)
             //    Console.Write($"{b} ");
             Console.WriteLine($"Text: {(frame.OpCode == WebSocketFrameOpCode.TEXT ? Encoding.UTF8.GetString(frame.OriginalBytes) : "")}");
@@ -160,28 +139,28 @@ namespace AuroraProxy
             return frame;
         }
 
-        public byte[] ToBytes(WebSocketFrame[] frames)
+        public IEnumerable<byte> ToBytes(IEnumerable<WebSocketFrame> frames)
         {
             List<byte> bytes = new();
             foreach(var frame in frames)
             {
                 bytes.AddRange(frame.FrameBytes);
             }
-            return bytes.ToArray();
+            return bytes;
         }
 
-        public WebSocketFrame[] EncodeTextData(string text, bool isMasked)
+        public IEnumerable<WebSocketFrame> EncodeTextData(string text, bool isMasked)
         {
             byte[] originalDataBytes = Encoding.UTF8.GetBytes(text);
             return encodeData(originalDataBytes, isMasked, WebSocketFrameOpCode.TEXT);
         }
 
-        public WebSocketFrame[] EncodeBinData(byte[] data, bool isMasked)
+        public IEnumerable<WebSocketFrame> EncodeBinData(IEnumerable<byte> data, bool isMasked)
         {
             return encodeData(data, isMasked, WebSocketFrameOpCode.BIN);
         }
 
-        private WebSocketFrame[] encodeData(byte[] data, bool isMasked, WebSocketFrameOpCode opCode)
+        private IEnumerable<WebSocketFrame> encodeData(IEnumerable<byte> data, bool isMasked, WebSocketFrameOpCode opCode)
         {
             List<WebSocketFrame> encodedFrames = new();
             int offset = 0;
@@ -189,18 +168,18 @@ namespace AuroraProxy
             {
                 encodedFrames.Add(encodeFrame(data, isMasked, opCode, ref offset));
             }
-            return encodedFrames.ToArray();
+            return encodedFrames;
         }
 
-        private WebSocketFrame encodeFrame(byte[] data, bool isMasked, WebSocketFrameOpCode opCode, ref int offset)
+        private WebSocketFrame encodeFrame(IEnumerable<byte> data, bool isMasked, WebSocketFrameOpCode opCode, ref int offset)
         {
-            byte[] dataToEncode = data.Skip(offset).ToArray();
+            List<byte> dataToEncode = data.Skip(offset).ToList();
             WebSocketFrame frame = new WebSocketFrame();
             frame.IsFinal = true;
-            if (dataToEncode.Length > WebSocketLimits.MAX_LEN_127)
+            if (dataToEncode.Count > WebSocketLimits.MAX_LEN_127)
             {
                 offset += WebSocketLimits.MAX_LEN_127;
-                dataToEncode = dataToEncode.Take(WebSocketLimits.MAX_LEN_127).ToArray();
+                dataToEncode = dataToEncode.Take(WebSocketLimits.MAX_LEN_127).ToList();
                 frame.IsFinal = false;
             }
             else
@@ -209,19 +188,19 @@ namespace AuroraProxy
             }
             frame.OpCode = opCode;
             if (isMasked) frame.Mask = createMask();
-            frame.Length = dataToEncode.Length;
-            frame.OriginalBytes = dataToEncode;
+            frame.Length = dataToEncode.Count;
+            frame.OriginalBytes = dataToEncode.ToArray();
             return frame;
         }
 
-        public string[] DecodeTextData(WebSocketFrame[] textFrames)
+        public IEnumerable<string> DecodeTextData(IEnumerable<WebSocketFrame> textFrames)
         {
             List<string> texts = new List<string>();
             StringBuilder stringBuilder = new StringBuilder();
-            for(int i = 0; i < textFrames.Length; i++)
+            for(int i = 0; i < textFrames.Count(); i++)
             {
-                stringBuilder.Append(Encoding.UTF8.GetString(textFrames[i].OriginalBytes));
-                if (textFrames[i].IsFinal)
+                stringBuilder.Append(Encoding.UTF8.GetString(textFrames.ElementAt(i).OriginalBytes));
+                if (textFrames.ElementAt(i).IsFinal)
                 {
                     texts.Add(stringBuilder.ToString());
                     stringBuilder = new();

@@ -27,8 +27,7 @@ namespace AuroraProxy
         private int _proxyPort;
 
 
-        public bool IsServerConnectionInitialized { get; private set; } = false;
-        public bool IsClientConnectionInitialized { get; private set; } = false;
+        public int ReadyCounter { get; private set; }
         public string CustomUserAgent { get; set; }
 
         public WebSocketProxy(string serverHost, int serverPort, int proxyPort)
@@ -36,6 +35,7 @@ namespace AuroraProxy
             _serverHost = serverHost;
             _serverPort = serverPort;
             _proxyPort = proxyPort;
+            ReadyCounter = 0;
         }
 
         public void Init()
@@ -68,27 +68,32 @@ namespace AuroraProxy
                 _serverSocket.BeginConnect(_serverHost, _serverPort, onServerConnected, null);
             }
             handshakeClient(_clientStream);
-            while (!IsServerConnectionInitialized) { }
-            IsClientConnectionInitialized = true;
+            ReadyCounter++;
+            while (ReadyCounter != 2) { }
             while (_clientStream.Socket.Connected)
             {
                 if (_clientStream.DataAvailable)
                 {
                     List<byte> fullReadBuffer = new List<byte>();
-                    byte[] readBuffer = new byte[1024];
-                    int len = _clientStream.Read(readBuffer, 0, readBuffer.Length);
-                    
-                    fullReadBuffer.AddRange(readBuffer.Take(len));
-                    WebSocketFrame[] readFrames = clientCoder.FromBytes(fullReadBuffer.ToArray());
-                    string[] texts = clientCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
+                    while (_clientStream.DataAvailable)
+                    {
+                        byte[] readBuffer = new byte[1024];
+                        int len = _clientStream.Read(readBuffer, 0, readBuffer.Length);
+                        fullReadBuffer.AddRange(readBuffer.Take(len));
+                    }
+                    IEnumerable<WebSocketFrame> readFrames = clientCoder.FromBytes(fullReadBuffer);
+                    IEnumerable<string> texts = clientCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
                     foreach (string text in texts)
                     {
-                        //Console.WriteLine($"CLIENT -> SERVER: {text}");
-                        byte[] retranslateBuffer = clientCoder.ToBytes(clientCoder.EncodeTextData(text, true));
+#if RELEASE
+                        Console.WriteLine($"CLIENT -> SERVER: {text}");
+#endif
+                        byte[] retranslateBuffer = clientCoder.ToBytes(clientCoder.EncodeTextData(text, true)).ToArray();
                         _securedServerStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
                     }
                 }
             }
+            Console.WriteLine("Disconnected CLIENT <-> PROXY");
         }
 
         private void onServerConnected(IAsyncResult result)
@@ -107,8 +112,9 @@ namespace AuroraProxy
             Console.WriteLine("SSL Authed SERVER <-> PROXY");
 #endif
             handshakeServer(_securedServerStream, _serverStream);
-            IsServerConnectionInitialized = true;
-            while(!IsClientConnectionInitialized) { }
+
+            ReadyCounter++;
+            while (ReadyCounter != 2) { }
             while(_serverStream.Socket.Connected)
             {
                 if(_serverStream.DataAvailable)
@@ -118,39 +124,38 @@ namespace AuroraProxy
                     while (_serverStream.DataAvailable)
                     {
                         int len = _securedServerStream.Read(readBuffer, 0, readBuffer.Length);
-                        Console.WriteLine($"LENGTH OF READ DATA: {len}");
                         fullReadBuffer.AddRange(readBuffer.Take(len));
                     }
-                    WebSocketFrame[] readFrames = serverCoder.FromBytes(fullReadBuffer.ToArray());
-                    if (readFrames.Length == 0) continue;
+                    IEnumerable<WebSocketFrame> readFrames = serverCoder.FromBytes(fullReadBuffer.ToArray());
+                    if (readFrames.Count() == 0) continue;
                     WebSocketFrame pingFrame = readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.PING).LastOrDefault();
                     if(pingFrame is not null)
                     {
+#if DEBUG
                         Console.WriteLine("PROXY <-> SERVER: Ping-Pong");
+#endif
                         WebSocketFrame[] frames = { serverCoder.CreatePongFrame(pingFrame) };
-                        byte[] pongBuffer = serverCoder.ToBytes(frames);
-                        _securedServerStream.Write(pongBuffer);
+                        IEnumerable<byte> pongBuffer = serverCoder.ToBytes(frames);
+                        _securedServerStream.Write(pongBuffer.ToArray());
                     }
-                    string[] texts = serverCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
+                    IEnumerable<string> texts = serverCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
                     foreach (string text in texts)
                     {
-                        //Console.WriteLine($"SERVER -> CLIENT: {text}");
+#if RELEASE
+                        Console.WriteLine($"SERVER -> CLIENT: {text}");
+#endif
                         var frames = serverCoder.EncodeTextData(text, false);
-                        byte[] retranslateBuffer = serverCoder.ToBytes(frames);
+                        byte[] retranslateBuffer = serverCoder.ToBytes(frames).ToArray();
                         _clientStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
                     }
                 }
             }
-#if DEBUG
             Console.WriteLine("Disconnected SERVER <-> PROXY");
-#endif
         }
 
         private void handshakeServer(SslStream securedStream, NetworkStream stream)
         {
-#if DEBUG
             Console.WriteLine("Handshaking server started");
-#endif
             string handshakeRequest = createServerHandshake(_serverHost);
 #if DEBUG
             Console.WriteLine($"Server Handshake Request:\n{handshakeRequest}\n");
@@ -166,17 +171,16 @@ namespace AuroraProxy
                 sb.Append(Encoding.UTF8.GetString(readBuffer, 0, len));
             }
             string response = sb.ToString();
+
 #if DEBUG
             Console.WriteLine($"Server Handshake Response:\n{response}\n");
-            if (response.StartsWith("HTTP/1.1 101")) Console.WriteLine("Handshake complete");
 #endif
+            if (response.StartsWith("HTTP/1.1 101")) Console.WriteLine("Handshake complete");
         }
 
         private void handshakeClient(NetworkStream stream)
         {
-#if DEBUG
             Console.WriteLine("Handshaking client started");
-#endif
             while(!stream.DataAvailable) { }
             StringBuilder sb = new StringBuilder();
             while (stream.DataAvailable)
@@ -190,14 +194,13 @@ namespace AuroraProxy
             Console.WriteLine($"Client handshake request:\n{request}\n");
 #endif
             string response = createClientHandshakeResponse(request);
+
 #if DEBUG
             Console.WriteLine($"Client handshake response:\n{response}\n");
 #endif
             byte[] buffer = Encoding.UTF8.GetBytes(response);
             stream.Write(buffer);
-#if DEBUG
             Console.WriteLine("Handshaking client complete");
-#endif
         }
 
         private string createServerHandshake(string host)
@@ -217,7 +220,6 @@ namespace AuroraProxy
             requestSB.AppendLine("Sec-WebSocket-Version: 13");
             requestSB.AppendLine("Accept-Encoding: gzip, deflate, br");
             requestSB.AppendLine("Sec-WebSocket-Key: " + Convert.ToBase64String(buffer));
-            //requestSB.AppendLine("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits");
             requestSB.AppendLine();
             return requestSB.ToString();
         }
