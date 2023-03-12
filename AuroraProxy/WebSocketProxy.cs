@@ -13,6 +13,7 @@ namespace AuroraProxy
     public class WebSocketProxy
     {
         private readonly string newLine = "\r\n";
+        private const int BUFFER_SIZE = 1024 * 2;
 
         private Socket _acceptingSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
         private Socket _serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
@@ -26,6 +27,8 @@ namespace AuroraProxy
         private int _serverPort;
         private int _proxyPort;
 
+        private byte[] _serverReadBuffer = new byte[BUFFER_SIZE];
+        private byte[] _clientReadBuffer = new byte[BUFFER_SIZE];
 
         public int ReadyCounter { get; private set; }
         public string CustomUserAgent { get; set; }
@@ -75,25 +78,44 @@ namespace AuroraProxy
                 if (_clientStream.DataAvailable)
                 {
                     List<byte> fullReadBuffer = new List<byte>();
+                    //byte[] readBuffer = new byte[1024];
                     while (_clientStream.DataAvailable)
                     {
-                        byte[] readBuffer = new byte[1024];
-                        int len = _clientStream.Read(readBuffer, 0, readBuffer.Length);
-                        fullReadBuffer.AddRange(readBuffer.Take(len));
+                        int len = _clientStream.Read(_clientReadBuffer, 0, _clientReadBuffer.Length);
+                        fullReadBuffer.AddRange(_clientReadBuffer.Take(len));
                     }
                     IEnumerable<WebSocketFrame> readFrames = clientCoder.FromBytes(fullReadBuffer);
-                    IEnumerable<string> texts = clientCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
+                    if (readFrames.Any(f => f.OpCode == WebSocketFrameOpCode.CLOSE)) Console.WriteLine("=========CLOSE OPCODE==========");
+                    IEnumerable<string> texts = clientCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT));
                     foreach (string text in texts)
                     {
 #if RELEASE
                         Console.WriteLine($"CLIENT -> SERVER: {text}");
 #endif
                         byte[] retranslateBuffer = clientCoder.ToBytes(clientCoder.EncodeTextData(text, true)).ToArray();
-                        _securedServerStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
+                        if(_securedServerStream.CanWrite)
+                            _securedServerStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
+                    }
+                    IEnumerable<IEnumerable<byte>> binData = clientCoder.DecodeBinData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.BIN)); 
+                    foreach(var binSequence in binData)
+                    {
+                        Console.WriteLine($"CLIENT -> SERVER: BIN:");
+                        foreach(var b in binSequence)
+                        {
+                            Console.Write($"{b}  ");
+                        }
+                        Console.WriteLine();
                     }
                 }
             }
             Console.WriteLine("Disconnected CLIENT <-> PROXY");
+        }
+
+        private void prepareToReconnect()
+        {
+            if (_clientSocket.Connected) _clientSocket.Close();
+            if (_serverSocket.Connected) _serverSocket.Disconnect(true);
+            _acceptingSocket.BeginAccept(onClientAccepted, null);
         }
 
         private void onServerConnected(IAsyncResult result)
@@ -120,11 +142,10 @@ namespace AuroraProxy
                 if(_serverStream.DataAvailable)
                 {
                     List<byte> fullReadBuffer = new List<byte>();
-                    byte[] readBuffer = new byte[1024];
                     while (_serverStream.DataAvailable)
                     {
-                        int len = _securedServerStream.Read(readBuffer, 0, readBuffer.Length);
-                        fullReadBuffer.AddRange(readBuffer.Take(len));
+                        int len = _securedServerStream.Read(_serverReadBuffer, 0, _serverReadBuffer.Length);
+                        fullReadBuffer.AddRange(_serverReadBuffer.Take(len));
                     }
                     IEnumerable<WebSocketFrame> readFrames = serverCoder.FromBytes(fullReadBuffer.ToArray());
                     if (readFrames.Count() == 0) continue;
@@ -137,6 +158,10 @@ namespace AuroraProxy
                         WebSocketFrame[] frames = { serverCoder.CreatePongFrame(pingFrame) };
                         IEnumerable<byte> pongBuffer = serverCoder.ToBytes(frames);
                         _securedServerStream.Write(pongBuffer.ToArray());
+
+                        WebSocketFrame[] clientPingFrames = { serverCoder.CreatePingFrame() };
+                        IEnumerable<byte> pingBuffer = serverCoder.ToBytes(clientPingFrames);
+                        _clientStream.Write(pingBuffer.ToArray());
                     }
                     IEnumerable<string> texts = serverCoder.DecodeTextData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.TEXT).ToArray());
                     foreach (string text in texts)
@@ -144,9 +169,17 @@ namespace AuroraProxy
 #if RELEASE
                         Console.WriteLine($"SERVER -> CLIENT: {text}");
 #endif
-                        var frames = serverCoder.EncodeTextData(text, false);
-                        byte[] retranslateBuffer = serverCoder.ToBytes(frames).ToArray();
-                        _clientStream.Write(retranslateBuffer, 0, retranslateBuffer.Length);
+                        _clientStream.Write(serverCoder.ToBytes(serverCoder.EncodeTextData(text, false)).ToArray());
+                    }
+                    IEnumerable<IEnumerable<byte>> binData = serverCoder.DecodeBinData(readFrames.Where(f => f.OpCode == WebSocketFrameOpCode.BIN));
+                    foreach (var binSequence in binData)
+                    {
+                        Console.WriteLine($"SERVER -> CLIENT BIN:");
+                        foreach (var b in binSequence)
+                        {
+                            Console.Write($"{b}  ");
+                        }
+                        Console.WriteLine();
                     }
                 }
             }
@@ -218,7 +251,7 @@ namespace AuroraProxy
             requestSB.AppendLine("Upgrade: websocket");
             requestSB.AppendLine("Origin: https://" + host);
             requestSB.AppendLine("Sec-WebSocket-Version: 13");
-            requestSB.AppendLine("Accept-Encoding: gzip, deflate, br");
+            //requestSB.AppendLine("Accept-Encoding: gzip, deflate, br");
             requestSB.AppendLine("Sec-WebSocket-Key: " + Convert.ToBase64String(buffer));
             requestSB.AppendLine();
             return requestSB.ToString();

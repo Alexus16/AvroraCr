@@ -167,6 +167,7 @@ namespace AuroraProxy
             while(offset != -1)
             {
                 encodedFrames.Add(encodeFrame(data, isMasked, opCode, ref offset));
+                opCode = WebSocketFrameOpCode.CONTINIOUS;
             }
             return encodedFrames;
         }
@@ -199,6 +200,7 @@ namespace AuroraProxy
             StringBuilder stringBuilder = new StringBuilder();
             for(int i = 0; i < textFrames.Count(); i++)
             {
+                if (textFrames.ElementAt(i).OpCode != WebSocketFrameOpCode.TEXT) continue;
                 stringBuilder.Append(Encoding.UTF8.GetString(textFrames.ElementAt(i).OriginalBytes));
                 if (textFrames.ElementAt(i).IsFinal)
                 {
@@ -206,7 +208,24 @@ namespace AuroraProxy
                     stringBuilder = new();
                 }
             }
-            return texts.ToArray();
+            return texts;
+        }
+
+        public IEnumerable<IEnumerable<byte>> DecodeBinData(IEnumerable<WebSocketFrame> binFrames)
+        {
+            List<IEnumerable<byte>> binData = new List<IEnumerable<byte>>();
+            List<byte> binSequence = new();
+            for(int i = 0; i < binFrames.Count(); i++)
+            {
+                if (binFrames.ElementAt(i).OpCode != WebSocketFrameOpCode.BIN) continue;
+                binSequence.AddRange(binFrames.ElementAt(i).OriginalBytes);
+                if(binFrames.ElementAt(i).IsFinal)
+                {
+                    binData.Add(binSequence);
+                    binSequence = new();
+                }
+            }
+            return binData;
         }
 
         private int createMask()
@@ -292,14 +311,14 @@ namespace AuroraProxy
                 byte[] buffer126 = new byte[2];
                 for(int i = 0; i < buffer126.Length; i++)
                 {
-                    buffer126[i] += (byte)((Length & (0xFF << (8 * (1 - (i % 2))))) >> (8 * (1 - (i % 2))));
+                    buffer126[i] |= (byte)((Length & (0xFF << (8 * (1 - (i % 2))))) >> (8 * (1 - (i % 2))));
                 }
                 return buffer126;
             }
             byte[] buffer127 = new byte[8];
             for(int i = 0; i < buffer127.Length; i++)
             {
-                buffer127[i] += (byte)((Length & (0xFF << (8 * (7 - (i % 8))))) >> (8 * (7 - (i % 8))));
+                buffer127[i] |= (byte)(((long)Length & (0xFF << (8 * (7 - (i % 8))))) >> (8 * (7 - (i % 8))));
             }
             return buffer127;
         }
