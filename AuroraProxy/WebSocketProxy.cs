@@ -90,7 +90,7 @@ namespace AuroraProxy
                     foreach (string text in texts)
                     {
 #if RELEASE
-                        Console.WriteLine($"CLIENT -> SERVER: {text}");
+                        Console.WriteLine($"CLIENT -> SERVER: Length:{text.Length}");
 #endif
                         byte[] retranslateBuffer = clientCoder.ToBytes(clientCoder.EncodeTextData(text, true)).ToArray();
                         if(_securedServerStream.CanWrite)
@@ -167,7 +167,7 @@ namespace AuroraProxy
                     foreach (string text in texts)
                     {
 #if RELEASE
-                        Console.WriteLine($"SERVER -> CLIENT: {text}");
+                        Console.WriteLine($"SERVER -> CLIENT: Length:{text.Length}");
 #endif
                         _clientStream.Write(serverCoder.ToBytes(serverCoder.EncodeTextData(text, false)).ToArray());
                     }

@@ -12,6 +12,7 @@ using WebSocket4Net;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Authentication;
 using AuroraProxy;
+using System.IO;
 
 HttpListener listener = new HttpListener();
 
@@ -35,57 +36,89 @@ Thread thread = new Thread(() =>
         var context = listener.GetContext();
         var request = context.Request;
         var response = context.Response;
-        string pathAndQuery = request.Url.PathAndQuery;
-        //Console.WriteLine($"Req started: {request.Url.ToString()}");
-        if (!pathAndQuery.Contains("student"))
+        string rawUrl = request.Url.ToString();
+
+        var originalPage = getOriginalPage(rawUrl);
+        string ext = Path.GetExtension(request.Url.LocalPath);
+#if DEBUG
+        Console.Write($"CLIENT <-> SERVER HTTP: {rawUrl} ");
+        Console.Write($"{ext} ");
+#endif
+        byte[] buffer;
+        if (ext == "" || ext == ".js" || ext == ".css")
         {
-            pathAndQuery = "/student" + pathAndQuery;
+#if DEBUG
+            Console.WriteLine("text");
+#endif
+            string originalPageText = getOriginalPageText(originalPage);
+            if (request.Url.LocalPath == startPageLocalPath || request.Url.LocalPath == studentPageLocalPath)
+            {
+                originalPageText = originalPageText.Replace("+location.host+'/student/arm/'", "+\"127.0.0.1:500\"");
+                originalPageText = originalPageText.Replace("wss:", "ws:");
+            }
+            if (request.Url.LocalPath.Contains("app"))
+            {
+                originalPageText = originalPageText.Replace("canPaste:", "canPaste: function(txt, isHTML) {return(true);}, fuckPuturidze:");
+            }
+            buffer = Encoding.UTF8.GetBytes(originalPageText);
         }
-        var originalPage = getOriginalPageText(pathAndQuery);
-        if(request.Url.LocalPath == startPageLocalPath || request.Url.LocalPath == studentPageLocalPath)
+        else
         {
-            originalPage = originalPage.Replace("+location.host+'/student/arm/'", "+\"127.0.0.1:500\"");
-            originalPage = originalPage.Replace("wss:", "ws:");
+#if DEBUG
+            Console.WriteLine("bytes");
+#endif
+            buffer = getOriginalPageBytes(originalPage);
         }
-        if(request.Url.LocalPath.Contains("app"))
+        try
         {
-            originalPage = originalPage.Replace("canPaste:", "canPaste: function(txt, isHTML) {return(true);}, fuckPuturidze:");
+            context.Response.OutputStream.Write(buffer);
         }
-        context.Response.OutputStream.Write(Encoding.UTF8.GetBytes(originalPage));
-        response.OutputStream.Close();
-        response.Close();
-        //Console.WriteLine($"Req finished: {pathAndQuery}");
+        catch { }
+        finally
+        {
+            response.OutputStream.Close();
+            response.Close();
+        }
     }
 });
 thread.Start();
 
-WebSocketProxy proxy = new WebSocketProxy("mirea.aco-avrora.ru", 443, 500);
+WebSocketProxy proxy = new WebSocketProxy(originalUrlWS, 443, 500);
 proxy.Init();
 
-string getOriginalPageText(string localPath)
+HttpResponseMessage getOriginalPage(string localUrl)
 {
-    //Console.WriteLine($"Page requested: {localPath}");
     HttpClient copyClient = new HttpClient();
     copyClient.DefaultRequestHeaders.Add("User-Agent", avroraUserAgent);
     int errorCounter = 0;
-    while(true)
+    while (true)
     {
         try
         {
-            var originalResponse = copyClient.GetAsync(originalUrl + localPath).Result;
-            var originalPageText = originalResponse.Content.ReadAsStringAsync().Result;
-            //Console.WriteLine($"Page received: {localPath}");
-            return originalPageText;
+            string originalPageUrl = localUrl.Replace("http://127.0.0.1", originalUrl);
+            var originalResponse = copyClient.GetAsync(originalPageUrl).Result;
+            return originalResponse;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Page receiving error: {ex.Message}");
-            if(errorCounter++ > 5)
+            if (errorCounter++ > 5)
             {
-                return ex.Message;
-            }    
+                return null;
+            }
         }
     }
+    copyClient.Dispose();
+}
+
+string getOriginalPageText(HttpResponseMessage message)
+{
+    return message.Content.ReadAsStringAsync().Result;
+}
+
+byte[] getOriginalPageBytes(HttpResponseMessage message)
+{
+    return message.Content.ReadAsByteArrayAsync().Result;
 }
 
 
